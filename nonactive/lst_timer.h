@@ -4,27 +4,19 @@
 #include<stdio.h>
 #include<time.h>
 
-
 #define BUFFER_SIZE 64
 
 class util_timer;
+class http_conn;
 
-struct client_data{
-    struct sockaddr_in address;  //用户的地址
-    int sockfd;
-    char buf[BUFFER_SIZE];
-    util_timer* timer;  //这个用户专属的计时器
-};
 //这个是定时器链表中的元素
 
 class util_timer{
 public:
-    util_timer():prev(NULL),next(NULL){}
-    
-
+    util_timer(http_conn* user);
     time_t expire;  //结束的时间点
-    void (*cb_func)(client_data*);  //回调函数，时间到了以后调用
-    client_data* user_data;  //  指向用户的指针
+    
+    http_conn* user_data;  //  指向用户的指针
     util_timer* prev;
     util_timer* next;
 };

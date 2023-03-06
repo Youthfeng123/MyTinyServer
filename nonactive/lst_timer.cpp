@@ -1,4 +1,10 @@
-#include "lst_timer.h"
+#include "../Headers.h"
+
+
+util_timer::util_timer(http_conn* user):prev(NULL),next(NULL),user_data(user){
+        expire = time(NULL);
+        user_data->timer = this;
+    }
 
 void sort_timer_lst::add_timer(util_timer* timer){
     if(!timer)   //传进来什么玩意
@@ -9,7 +15,7 @@ void sort_timer_lst::add_timer(util_timer* timer){
         head = timer;
         tail = timer;
         return;
-    }ƒ
+    }
     //走到这里，说明链表不为空，看看是不是加到表头
     if(timer->expire<head->expire){
         head->prev = timer;
@@ -107,17 +113,18 @@ void sort_timer_lst::tick(){
     time_t cur = time(NULL); //现在的时间  就个数 别管是什么了
     //遍历所有过时的对象
     while(head&&head->expire < cur){  //如果当前的头已经过期了
-        printf("close ")
+        
         util_timer* CurNode = head;
+        printf("close One here,fd:%d\n",CurNode->user_data->m_sockfd);
         head = head->next;
         if(head)
             head->prev = nullptr;
-        CurNode->cb_func(CurNode->user_data);
+        CurNode->user_data->close_conn();
         delete CurNode;
-        CurNode = head;
     }
     if(head==nullptr){
         tail=nullptr;
     }
+
 
 }
