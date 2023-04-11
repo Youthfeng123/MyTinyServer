@@ -24,6 +24,8 @@ static sort_timer_lst timer_list;
 extern void addfd( int epollfd, int fd, bool one_shot );
 extern void removefd( int epollfd, int fd );
 static int TimerPipe[2];
+
+
 void AlarmHandler(int Signal){
     //我接受到了信号，要往信号通 信管道写东西，通知主循环，有事件过期了
     printf("Receive an Sigalarm \n");
@@ -124,8 +126,9 @@ int main( int argc, char* argv[] ) {
                 }
                 //这里用了个哈希，让fd直接映射到对应的请求对象
                 users[connfd].init( connfd, client_address);  //把这个socket封装成请求对象
-                util_timer* newTimer = new util_timer(users+connfd);
-                users[connfd].timer = newTimer;
+                //给这个对象列入非活跃系统
+                util_timer* newTimer = new util_timer(users+connfd);  //
+                
                 timer_list.add_timer(newTimer);
 
             } 

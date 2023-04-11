@@ -75,8 +75,8 @@ void http_conn::close_conn()
 {
     if (m_sockfd != -1)
     {
-        removefd(m_epollfd, m_sockfd);
-        m_sockfd = -1;
+        removefd(m_epollfd, m_sockfd);  //取消epoll监听
+        m_sockfd = -1;  //当前对象设为未使用
         m_user_count--;
     }
 }
@@ -534,7 +534,7 @@ bool http_conn::write()   //epoll 监听到EPOLLOUT 事件以后 就会调用这
         //     temp = send(m_sockfd,m_iov[1].iov_base,m_iov[1].iov_len,0);
         // }
         // temp = writev(m_sockfd,m_iov,m_iv_count);
-        temp = writev(m_sockfd, m_iov, m_iv_count);   //这里是不完备的
+        temp = writev(m_sockfd, m_iov, m_iv_count);   //这里是不完备的 没办法一次发送大文件
         if(temp<=-1){
             //无法发送了
             if(errno == EAGAIN){
