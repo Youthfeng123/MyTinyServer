@@ -4,12 +4,15 @@
 #include<stdio.h>
 #include<time.h>
 
-#define BUFFER_SIZE 64
+// #define BUFFER_SIZE 64
 
 class util_timer;
 class http_conn;
 
 //这个是定时器链表中的元素
+
+const int BUFFER_SIZE = 64;
+
 
 class util_timer{
 public:

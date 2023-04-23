@@ -10,6 +10,7 @@
 #include <sys/epoll.h>
 #include "Headers.h"
 #include <sys/time.h>
+#include<string>
 
 #define MAX_FD 65536   // 最大的文件描述符个数
 #define MAX_EVENT_NUMBER 10000  // 监听的最大的事件数量
@@ -36,9 +37,9 @@ void AlarmHandler(int Signal){
 
 void addsig(int sig, void( handler )(int)){// 注册信号处理函数
     struct sigaction sa;
-    memset( &sa, '\0', sizeof( sa ) );
+    memset( &sa, '\0', sizeof( sa ) );  //清空这段内存
     sa.sa_handler = handler;
-    sigfillset( &sa.sa_mask );
+    sigfillset( &sa.sa_mask );  //注册的时候屏蔽信号
     sigaction(sig,&sa,NULL);
 }
 
@@ -48,19 +49,25 @@ int main( int argc, char* argv[] ) {
         printf( "usage: %s port_number\n", basename(argv[0]));
         return 1;
     }
-    //创建一个管道，用于监听信号 
+    //创建一个管道，用于监听事件过期信号 
     int suc = socketpair(AF_UNIX,SOCK_STREAM,0,TimerPipe);
+
     if(suc==-1){
         perror("socketpair");
         exit(-1);
     }
+
+
     int port = atoi( argv[1] );
     addsig( SIGPIPE, SIG_IGN );  //忽略SIGPIPE信号 ，往一个已经关闭的socket写东西时候会产生
     addsig(SIGALRM,AlarmHandler);   //注册信号，让程序接收到定时闹钟的信号的时候处理
+
+
     threadpool< http_conn >* pool = NULL;  //线程池对象
     try {
-        pool = new threadpool<http_conn>;   //http_conn是线程要处理的请求对象
-    } catch(...) {
+        pool = new threadpool<http_conn>;   //http_conn是线程要处理的请求对象 创建一个线程池  把线程池放在堆里，可以与其它线程共享
+    } 
+    catch(...) {
         return -1;
     }
 
@@ -87,7 +94,7 @@ int main( int argc, char* argv[] ) {
     addfd( epollfd, listenfd, false );  //反正也只有主线程读取 不需要EPOLLONESHOT
     addfd(epollfd,TimerPipe[0],false);   //注册提示信号，让发来的跟事件一起 统一在循环中处理
     
-    http_conn::m_epollfd = epollfd;
+    http_conn::m_epollfd = epollfd;  //让连接对象记录epoll表的索引
     bool timeout = false;
 
     //开始计时
@@ -96,12 +103,13 @@ int main( int argc, char* argv[] ) {
     interval.it_value.tv_sec = 10;
     setitimer(ITIMER_REAL,&interval,NULL);
 
+    //这里采用的是reactor模仿proactor的IO处理模式，主程序读取数据以后，再由工作线程处理数据
     while(true) {
         
         int number = epoll_wait( epollfd, events_arr, MAX_EVENT_NUMBER, -1 );  //阻塞,等待可读消息
         
         if ( ( number < 0 ) && ( errno != EINTR ) ) {
-            printf( "epoll failure\n" );
+            printf( "epoll failure\n" );  //出错了
             break;
         }
 
@@ -114,11 +122,12 @@ int main( int argc, char* argv[] ) {
                 socklen_t size = sizeof( client_address );
                 int connfd = accept( listenfd, ( struct sockaddr* )&client_address, &size );
                 printf("create a new connection,fd:%d\n",connfd);
+
                 if ( connfd < 0 ) {
                     printf( "errno is: %d\n", errno );
                     perror("accept");
                     continue;
-                } 
+                }
                                         //如果链接数目已经满了
                 if( http_conn::m_user_count >= MAX_FD ) {
                     close(connfd); //这个socket就不要了
@@ -127,43 +136,46 @@ int main( int argc, char* argv[] ) {
                 //这里用了个哈希，让fd直接映射到对应的请求对象
                 users[connfd].init( connfd, client_address);  //把这个socket封装成请求对象
                 //给这个对象列入非活跃系统
-                util_timer* newTimer = new util_timer(users+connfd);  //
+                util_timer* newTimer = new util_timer(users+connfd);  //把当前的请求对象加入处理非活跃连接的链表
                 
                 timer_list.add_timer(newTimer);
 
-            } 
+            }
             else if( sockfd == TimerPipe[0]){
                 //接收到SIGALARM信号了
                 char readBuf[BUFFER_SIZE] = {0};
                 recv(TimerPipe[0],readBuf,BUFFER_SIZE,0);
-                if(strcasecmp(readBuf,"SIGALARM") == 0){
-                    timeout = true;
+                if(strcasecmp(readBuf,"SIGALARM") == 0){  //如果收到了定期检查的信号
+                    timeout = true;  //在这个循环结束时检查非活跃用户
                 }
 
             }
-            else if( events_arr[i].events & ( EPOLLRDHUP | EPOLLHUP | EPOLLERR ) ) { //来自请求信息
-                                            //这些不是由数据发来，而是有问题发生
-                timer_list.del_timer(users[sockfd].timer);
+            else if( events_arr[i].events & ( EPOLLRDHUP | EPOLLHUP | EPOLLERR ) ) { //来自请求信息，它出错了
+
+                //这些不是由数据发来，而是有问题发生
+                timer_list.del_timer(users[sockfd].timer);  //从定时队列里面删除这个fd
                 users[sockfd].close_conn();//所以直接关闭这个请求好了
+            }
 
-            } 
-            else if(events_arr[i].events & EPOLLIN) { //有数据来了
+            else if(events_arr[i].events & EPOLLIN) { //有数据来了，读请求
 
-                if(users[sockfd].read()) {  //先获取数据 然后再加入请求队列
+                if(users[sockfd].read()) {  //先获 数据 然后再加入请求队列  主线程读取完数据了，这里是用reactor模仿proactor，让主线程读完数据，再让子线程处理数据
                                 //传入的是地址
                     //更新定时器
                     time_t Now = time(NULL);
-                    users[sockfd].timer->expire = Now+TIMESLOT;
+                    users[sockfd].timer->expire = Now+TIMESLOT; //设置
                     timer_list.adjust_timer(users[sockfd].timer);
-                    pool->append(users + sockfd);  //如果是读信息 ，让线程完成，加入请求队列
-                } 
-                else {
+
+                    pool->append(users + sockfd);  //如果是读信息 ，让线程完成，加入请求队列 让线程去处理数据
+                }
+                else {  //读失败了，那么关闭这个连接
                     timer_list.del_timer(users[sockfd].timer);
                     users[sockfd].close_conn();
                 }
 
             }  
-            else if( events_arr[i].events & EPOLLOUT ) {  //写请求
+
+            else if( events_arr[i].events & EPOLLOUT ) {  //写请求  我在write里面自己设置了是否可写的监听
                 // printf("这里开始写东西了\n");
                 if( !users[sockfd].write() ) {  //主线程写东西
                     // printf("这里写失败了\n");
@@ -173,12 +185,13 @@ int main( int argc, char* argv[] ) {
                 }
             }
         }
+        //每检查一轮数据 开始更新响应队列
         if(timeout){
             timer_list.tick();
             timeout = false;
         }
     }
-    
+    //关闭服务器
     close( epollfd );
     close( listenfd );
     delete [] users;

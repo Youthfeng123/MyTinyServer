@@ -74,7 +74,7 @@ bool BlockedQueue<T>::push(const T& item){
     pthread_mutex_lock(m_mutex);  //队列里面的资源需要互斥地访问
     if(m_size > m_maxsize){
         //这时队列已经满了 提醒消费者来消费
-        pthread_cond_broadcast(m_cond);
+        pthread_cond_broadcast(m_cond);   //如果先解锁，再通知，那么解锁后有一个低优先级的线程执行上锁，然后再执行到wait
         pthread_mutex_unlock(m_mutex);
         return false;
     }

@@ -12,9 +12,12 @@ const char* error_404_form = "The requested file was not found on this server.\n
 const char* error_500_title = "Internal Error";
 const char* error_500_form = "There was an unusual problem serving the requested file.\n";
 
+
+//静态变量的定义
 int http_conn::m_epollfd = -1;
 int http_conn::m_user_count = 0;
-const char *http_conn::rootDir = "./resources";
+const char *http_conn::rootDir = "./resources"; 
+
 // 设置文件描述符非阻塞
 void setnonblocking(int fd)
 {
@@ -28,12 +31,13 @@ void addfd(int epollfd, int fd, bool one_shot)
 {
     epoll_event event;
     event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLRDHUP ; //?????对方异常断开，就在底层处理了
+    event.events = EPOLLIN | EPOLLRDHUP ; //对方异常断开，就通知我
 
     if (one_shot)
     {
-        event.events = event.events|EPOLLONESHOT;
+        event.events = event.events|EPOLLONESHOT;   //如果ONESHOT了，那么epoll通知过一次后，就移出监听队列了，所以还得重新注册
     }
+
     event.events |= EPOLLET; // 设置成边沿触发
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
     // 设置文件描述符非阻塞  因为ET模式一次把数据读完
@@ -60,14 +64,14 @@ void http_conn::init(int sockfd, const sockaddr_in &addr)
     m_sockfd = sockfd;
     m_address = addr;
 
-    // 设置sockfd的端口复用
+    // 设置sockfd的端口复用，复用监听端口
     int reuse = 1;
     setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
     // 添加到epoll对象
     addfd(m_epollfd, sockfd, true); // 让epoll监听这个文件描述符
     m_user_count++;                 // 数目自增
 
-    init(); // 初始化一些其它的数据
+    init(); // 初始化一些其它的数据  同名重载
 }
 
 // 关闭连接
@@ -83,7 +87,7 @@ void http_conn::close_conn()
 
 void http_conn::init()
 {
-    m_check_state = CHECK_STATE_REQUESTLINE; // 初始化状态为解析请求首行
+    m_check_state = CHECK_STATE_REQUESTLINE; // 初始化状态为解析请求首行  这个是主状态机的初始状态
     m_checked_index = 0;
     m_start_line = 0;
     m_read_idx = 0;
@@ -106,17 +110,17 @@ void http_conn::init()
 
 }
 
-// 循环读取客户的数据，直到客户没有数据或者对方关闭连接
+// 循环读取客户的数据，直到客户没有数据或者对方关闭连接，因为采用的是et工作模式
 bool http_conn::read()
 {
     if (m_read_idx >= READ_BUFFER_SIZE)
-    {                 // 问题是什么时候重置m_readidx?
-        return false; // 缓冲已经满了 ？ 等待下一次 一般是足够的
+    {       
+        return false; // 缓冲已经满了 直接返回（上一次的处理还没处理完呢）
     }
 
-    int bytes_read = 0;
+    int bytes_read = 0;  //记录已经读的字节数
     while (true)
-    { // 读到已经读的后面
+    { // 读到已经读的后面           开始写入的位置              剩余的写入空间
         bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0);
         if (bytes_read == -1)
         {
@@ -134,23 +138,24 @@ bool http_conn::read()
         // 读到数据了
         m_read_idx += bytes_read;
     }
-    // printf("读取到了数据：%s\n", m_read_buf);
     return true;
 }
 
 
 
-// 由线程池中的工作线程调用，这个是处理HTTP请求的入口函数
+// 由线程池中的工作线程调用，这个是处理HTTP请求的入口函数，调用这个函数的时候已经把数据读取到m_read_buf里面了
 void http_conn::process()
 {
     // 解析HTTP请求       //返回解析结果 对应前面的HTTP_CODE
-    HTTP_CODE read_ret = process_read(); //  这个是有限状态机  顺序调用 会分别解析请求行 请求体 和 数据包
+    HTTP_CODE read_ret = process_read(); //  这个是有限状态机  顺序调用 会分别解析请求行 请求体 和 数据包，把对应的数据存入对象变量里面
     if (read_ret == NO_REQUEST)
     { // 请求的数据不完整
         // 需要重新读取数据
         modfd(m_epollfd, m_sockfd, EPOLLIN); // 因为设置了EPOLLONESHOT 需要重新设置flag
+        //如果得到的请求数据都不完整，是不是别写了？
+        //return ;//?
     }
-
+    //read_ret 如果是FILE_REQUEST 那么把m_resorce_addr 发送出去
     // 生成响应
     bool write_ret = process_write(read_ret);
     if(!write_ret){
@@ -178,11 +183,11 @@ http_conn::HTTP_CODE http_conn::process_read()
         // 这一行没问题
         // 解析到了请求体或者解析到了一条完整的数据
         // 获取一行数据
-        text = get_line();
+        text = get_line();//text指向当前一行的开始
         m_start_line = m_checked_index; // 下一次解析的起点
-        // printf("got 1 http line:%s\n", text);
+        
         HTTP_CODE ret;
-        switch (m_check_state)
+        switch (m_check_state)  //肯定是从请求行开始的
         {
         case CHECK_STATE_REQUESTLINE:
         {
@@ -200,12 +205,12 @@ http_conn::HTTP_CODE http_conn::process_read()
                 return BAD_REQUEST;
             else if (ret == GET_REQUEST)
             {                        // 已经得到了完整的请求，请求信息存在m_url m_method等等里面了
-                return do_request(); // 处理具体请求的信息
+                return do_request(); // 处理具体请求的信息  如果成功处理文件 那么返回FILEREQUEST
             }
             break;
         }
 
-        case CHECK_STATE_CONTENT:
+        case CHECK_STATE_CONTENT:  //这里是不会运行到的
         {
             ret = parse_content(text);
             if (ret == GET_REQUEST)
@@ -213,6 +218,7 @@ http_conn::HTTP_CODE http_conn::process_read()
             line_status = LINE_OPEN;
             break;
         }
+
         default:
         {
             return INTERNAL_ERROR;
@@ -220,9 +226,20 @@ http_conn::HTTP_CODE http_conn::process_read()
         }
     }
 
-    return NO_REQUEST;
+    return NO_REQUEST;  //能运行到这里的肯定没问题
 }
 
+//请求方法  url  版本
+//GET /562f25980001b1b106000338.jpg HTTP/1.1  请求行
+//Host:img.mukewang.com  请求头
+//User-Agent:Mozilla/5.0 (Windows NT 10.0; WOW64)
+//AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.106 Safari/537.36
+//Accept:image/webp,image/*,*/*;q=0.8
+//Referer:http://www.imooc.com/
+//Accept-Encoding:gzip, deflate, sdch
+//Accept-Language:zh-CN,zh;q=0.8
+//空行
+//请求数据为空
 http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
 {
     // 解析http请求行，获得请求方法 请求URL 和HTTP版本
@@ -231,7 +248,7 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
     // GET\0/index.html HTTP/1.1
     *m_url++ = '\0'; // 切断
 
-    char *method = text;
+    char *method = text;  //方法在开头
     if (strcasecmp(method, "GET") == 0)
     {
         m_method = GET;
@@ -266,7 +283,7 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
     strcpy(m_resources_dir, rootDir);
     strcat(m_resources_dir, m_url);
 
-    m_check_state = CHECK_STATE_HEADER; // 检查主状态机状态变成 检查请求头
+    m_check_state = CHECK_STATE_HEADER; //改变状态机的状态 下一次检查请求头
 
     return NO_REQUEST;
 }
@@ -276,7 +293,7 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
     // 解析一行header
     // 主要解析几个东西： 是否保持连接？m_linger  content-length 和host
 
-    if (!strlen(text) || text[0] == '\0')
+    if (!strlen(text) || text[0] == '\0')  //读到空行了
     {
         // printf("数据头解析完毕！\n");
         return GET_REQUEST;
@@ -309,7 +326,7 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
     //     printf( "oop! unknow header %s\n", text );
     // }
 
-    return NO_REQUEST;
+    return NO_REQUEST;   //运行到这里，说明没有读到空行，那么请求头部分就没有解析完毕，需要继续解析
 }
 
 // 这里只判断我们读入的数据包 到底有没有完整地读取数据体
@@ -340,29 +357,31 @@ http_conn::LINE_STATUS http_conn::parse_line()
     { // 遍历一行数据
 
         temp = m_read_buf[m_checked_index];
+
+        //只处理\r和\n的地方，其余地方不管
         if (temp == '\r')
         {
             if ((m_checked_index + 1) == m_read_idx)
             {                     // 如果下一个字符就结束了
-                return LINE_OPEN; // 这个不完整  因为下一个应该是\n?
+                return LINE_OPEN; // 这个不完整  因为下一个应该是\n
             }
             else if (m_read_buf[m_checked_index + 1] == '\n')
-            { // 有的系统只有\n结尾
+            { //  此时的内容 ****\0\0  把\r和\n隐去了
                 m_read_buf[m_checked_index++] = '\0';
                 m_read_buf[m_checked_index++] = '\0';
                 return LINE_OK; // 这是完整的一行了
             }
-            return LINE_BAD;
+            return LINE_BAD;  //\r后面不是\n 就说明不完整
         }
-        else if (temp == '\n')
-        {
+        else if (temp == '\n')  //如果是\n开始？  肯定先读到\r吧？
+        { //走不到这里的吧
             if ((m_checked_index > 1) && (m_read_buf[m_checked_index - 1] == '\r'))
             {
                 m_read_buf[m_checked_index - 1] = '\0';
                 m_read_buf[m_checked_index++] = '\0';
                 return LINE_OK;
             }
-            return LINE_BAD;
+            return LINE_BAD;// \n前面不是\r说明不完整
         }
     }
 
@@ -370,12 +389,12 @@ http_conn::LINE_STATUS http_conn::parse_line()
 }
 
 http_conn::HTTP_CODE http_conn::do_request()
-{ // 获取某一个文件    这个也是个有限状态机 可能是解析头部 也可能是解析数据体
+{ // 获取某一个文件   可能是解析头部 也可能是解析数据体
 
     // printf("处理了请求,资源符是：%s\n", m_resources_dir);
     int DirLength = strlen(m_resources_dir);
     if (m_resources_dir[DirLength - 1] == '/')
-        strcat(m_resources_dir, "index.html");
+        strcat(m_resources_dir, "index.html");  //如果最后没有指定特定的文件，就返回一个指定的文件
         
     int ret = stat(m_resources_dir, &m_stat);
     if (ret == -1)
@@ -384,7 +403,7 @@ http_conn::HTTP_CODE http_conn::do_request()
         printf("lack file:%s\n",m_resources_dir);
         return NO_RESOURCE;
     }
-    if (m_stat.st_mode & S_IFMT != S_IFREG || S_ISDIR(m_stat.st_mode))//not regular file 
+    if (m_stat.st_mode & S_IFMT != S_IFREG || S_ISDIR(m_stat.st_mode))//不是一个可以发送的文件
     {
         return BAD_REQUEST;
     }
@@ -395,11 +414,13 @@ http_conn::HTTP_CODE http_conn::do_request()
 
     int fd = open(m_resources_dir, O_RDONLY);
    
-    m_resource_addr = (char *)mmap(NULL, m_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    m_resource_addr = (char *)mmap(NULL, m_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);  //把磁盘里面的文件映射到内存
 
     close(fd);
     return FILE_REQUEST; // 拿到了文件
 }
+
+
 
 bool http_conn::add_response(const char* format,...){  //format 里面有\n就可以了
     if(m_write_idx>=WRITE_BUFFER_SIZE)
@@ -409,9 +430,9 @@ bool http_conn::add_response(const char* format,...){  //format 里面有\n就�
     //variatic variable list
     va_list arg;
     va_start(arg,format);  //只是为了找到第一个参数的位置
-    int orgsize = WRITE_BUFFER_SIZE - m_write_idx -1;
+    int orgsize = WRITE_BUFFER_SIZE - m_write_idx -1;  //剩余的地方
     
-    int len = vsnprintf(m_write_buf+m_write_idx,orgsize,format,arg);
+    int len = vsnprintf(m_write_buf+m_write_idx,orgsize,format,arg);  //把可变参数原封不动地输入
     
     if(len >= WRITE_BUFFER_SIZE - m_write_idx -1){
         va_end(arg);
@@ -431,7 +452,7 @@ bool http_conn::add_response(const char* format,...){  //format 里面有\n就�
 bool http_conn::process_write(HTTP_CODE code){
     //应对每一种解析返回值 作出相应的响应
 
-    switch(code){
+    switch(code){ //根据不同的返回码生成不同的响应
         case INTERNAL_ERROR:
         {   
             //内部错误
@@ -478,7 +499,7 @@ bool http_conn::process_write(HTTP_CODE code){
                 m_iov[0].iov_base = m_write_buf;  //首先发送文件头
                 m_iov[0].iov_len  = m_write_idx;
 
-                m_iov[1].iov_base = m_resource_addr;
+                m_iov[1].iov_base = m_resource_addr;  //发送数据体
                 m_iov[1].iov_len = m_stat.st_size;
                 m_iv_count = 2;  //一共要发送两个缓冲区的数据
 
@@ -545,6 +566,7 @@ bool http_conn::write()   //epoll 监听到EPOLLOUT 事件以后 就会调用这
                 modfd(m_epollfd,m_sockfd,EPOLLOUT);
                 return true;
             }
+            //那就是对面关闭了
             unmap();
             return false;
         }

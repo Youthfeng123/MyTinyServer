@@ -9,23 +9,24 @@
 class locker{
 
 public:
+    //初始化
     locker(){
         if(pthread_mutex_init(&m_mutext,NULL)!=0){  //初始化一个互斥锁
             throw  std::exception(); //抛出一个异常
-
         }
-    }
 
+    }
+    //上锁
     bool lock(){
         //上锁 如果已经被占用，则会被阻塞
         return pthread_mutex_lock(&m_mutext) == 0;
     }
-
+    //解锁
     bool unlock(){
         //解锁 用于修改临界资源完成时 解锁让其它线程能够操作临界资源
         return pthread_mutex_unlock(&m_mutext) == 0;
     }
-
+    //拿锁变量
     pthread_mutex_t* get(){
         return &m_mutext;
     }
@@ -35,9 +36,7 @@ public:
     }
 
 private:
-pthread_mutex_t m_mutext;
-
-
+pthread_mutex_t m_mutext;  //访问同一个资源的时候，需要对同一个锁执行上锁
 };
 
 //条件变量类，要跟互斥锁一起使用，基本模型是：生产者-消费者模型
@@ -89,7 +88,11 @@ public:
             throw std::exception();
         }
     }
-
+    sem(int num){
+        if(sem_init(&m_sem,0,num) != 0){
+            throw std::exception();
+        }
+    }
 
     ~sem(){
         sem_destroy(&m_sem);
