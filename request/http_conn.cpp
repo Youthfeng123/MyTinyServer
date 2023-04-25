@@ -16,7 +16,10 @@ const char* error_500_form = "There was an unusual problem serving the requested
 //静态变量的定义
 int http_conn::m_epollfd = -1;
 int http_conn::m_user_count = 0;
-const char *http_conn::rootDir = "./resources"; 
+const char *http_conn::rootDir = "./root"; 
+MYSQL* http_conn::mysqlConn = nullptr;
+std::map<std::string,std::string> http_conn::usr2psswd;
+locker http_conn::m_sqlLock;
 
 // 设置文件描述符非阻塞
 void setnonblocking(int fd)
@@ -59,6 +62,36 @@ void modfd(int epollfd, int fd, int env)
     epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 
+void http_conn::init_mysqlConn(){
+    MYSQL* conn = http_conn::mysqlConn;
+    if(!conn){
+        std::cout<<"Mysql connection init failly"<<std::endl;
+        exit(-1);
+    }
+    MYSQL_RES* res;
+    MYSQL_ROW row;
+    //成功执行的时候返回0
+    http_conn::m_sqlLock.lock();
+    if(mysql_query(conn,"SELECT username, passwd FROM user")){
+        std::cout<<"Fail to execute a command to MYSQL"<<" "<<mysql_error(conn)<<std::endl;
+        exit(-1);
+    }   
+    res = mysql_use_result(conn);
+
+    while((row = mysql_fetch_row(res))!=nullptr){
+        usr2psswd.insert({row[0],row[1]});
+    }
+
+    mysql_free_result(res);
+    http_conn::m_sqlLock.unlock();
+
+    std::cout<<"here is the users and passwords"<<std::endl;
+    for(auto& x: usr2psswd){
+        std::cout<<"user:"<<x.first<<" "<<"password:"<<x.second<<std::endl;
+    }
+}
+
+
 void http_conn::init(int sockfd, const sockaddr_in &addr)
 {
     m_sockfd = sockfd;
@@ -79,9 +112,11 @@ void http_conn::close_conn()
 {
     if (m_sockfd != -1)
     {
+        // printf("connection closed: %d\n",m_sockfd);
         removefd(m_epollfd, m_sockfd);  //取消epoll监听
         m_sockfd = -1;  //当前对象设为未使用
         m_user_count--;
+        
     }
 }
 
@@ -106,7 +141,7 @@ void http_conn::init()
     bytes_have_send = 0;
     m_host = 0;
     m_write_idx = 0;
-    
+    cgi = false;
 
 }
 
@@ -157,7 +192,7 @@ void http_conn::process()
     }
     //read_ret 如果是FILE_REQUEST 那么把m_resorce_addr 发送出去
     // 生成响应
-    bool write_ret = process_write(read_ret);
+    bool write_ret = process_write(read_ret);   //这个只是把数据准备好了
     if(!write_ret){
         close_conn();
     }
@@ -196,7 +231,7 @@ http_conn::HTTP_CODE http_conn::process_read()
                 return BAD_REQUEST;
             break;
         }
-        
+
         case CHECK_STATE_HEADER:
         {
             ret = parse_headers(text); // 这里只解析一行 解析所有行以后
@@ -226,7 +261,7 @@ http_conn::HTTP_CODE http_conn::process_read()
         }
     }
 
-    return NO_REQUEST;  //能运行到这里的肯定没问题
+    return NO_REQUEST;  //能运行到这里说明数据不完整，需要继续监听描述符
 }
 
 //请求方法  url  版本
@@ -250,21 +285,25 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
 
     char *method = text;  //方法在开头
     if (strcasecmp(method, "GET") == 0)
-    {
+    {   
         m_method = GET;
+    }
+    else if(strcasecmp(method,"POST")==0){
+        m_method = POST;
+        cgi = true;
     }
     else
     {
         return BAD_REQUEST; // 因为不支持其它方法
     }
-    //  /index.html HTTP/1.1
-    m_version = strpbrk(m_url, " \t");
+    //  /index.html HTTP/1.1  找到http前面那个空格
+    m_version = strpbrk(m_url, " \t"); 
     if (!m_version)
     {
         return BAD_REQUEST;
     }
     //  /index.html\0HTTP/1.1
-    *m_version++ = '\0';
+    *m_version++ = '\0';  //其实这个版本没在其它地方用了
     if (strcasecmp(m_version, "HTTP/1.1") != 0)
     {
         return BAD_REQUEST; // 只支持HTTP/1.1
@@ -280,8 +319,9 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
         return BAD_REQUEST;
     }
     // 处理资源路径
-    strcpy(m_resources_dir, rootDir);
-    strcat(m_resources_dir, m_url);
+    if(strlen(m_url) == 1){
+        strcat(m_url,"judge.html");
+    }
 
     m_check_state = CHECK_STATE_HEADER; //改变状态机的状态 下一次检查请求头
 
@@ -296,6 +336,10 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
     if (!strlen(text) || text[0] == '\0')  //读到空行了
     {
         // printf("数据头解析完毕！\n");
+        if(m_content_length>0){
+            m_check_state = CHECK_STATE_CONTENT;
+            return NO_REQUEST;  //还有请求体需要分析
+        }
         return GET_REQUEST;
     }
 
@@ -307,12 +351,14 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
         if (strcasecmp(text, "keep-alive") == 0)
             m_linger = true; // 说明要保持连接
     }
+
     else if (strncasecmp(text, "Content-Length:", 15) == 0)
     {
         text += 15;
         text += strspn(text, " \t");
         // printf("Receive data:%s\n", text);
         m_content_length = (unsigned)atol(text);
+        
     }
 
     else if (strncasecmp(text, "Host:", 5) == 0)
@@ -320,11 +366,9 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
         text += 5;
         text += strspn(text, " \t");
         m_host = text;
-        // printf("Receive data:%s\n", text);
+        
     }
-    // else {
-    //     printf( "oop! unknow header %s\n", text );
-    // }
+   
 
     return NO_REQUEST;   //运行到这里，说明没有读到空行，那么请求头部分就没有解析完毕，需要继续解析
 }
@@ -332,8 +376,8 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
 // 这里只判断我们读入的数据包 到底有没有完整地读取数据体
 http_conn::HTTP_CODE http_conn::parse_content(char *text)
 {
-    if (m_content_length == 0)
-        return GET_REQUEST;
+    // if (m_content_length == 0)
+    //     return GET_REQUEST;  
     // else{
     //     if(text + m_content_length == m_checked_index)
     //         return GET_REQUEST;
@@ -343,8 +387,11 @@ http_conn::HTTP_CODE http_conn::parse_content(char *text)
     if (m_read_idx >= (m_content_length + m_checked_index))
     {
         text[m_content_length] = '\0';
+        m_string = text;
         return GET_REQUEST;
     }
+
+
     return NO_REQUEST;
 }
 
@@ -391,12 +438,94 @@ http_conn::LINE_STATUS http_conn::parse_line()
 http_conn::HTTP_CODE http_conn::do_request()
 { // 获取某一个文件   可能是解析头部 也可能是解析数据体
 
-    // printf("处理了请求,资源符是：%s\n", m_resources_dir);
-    int DirLength = strlen(m_resources_dir);
-    if (m_resources_dir[DirLength - 1] == '/')
-        strcat(m_resources_dir, "index.html");  //如果最后没有指定特定的文件，就返回一个指定的文件
-        
+    //走到这里 m_resources_dir是空的，m_url指向 /序号  或者/judge.html
+    //如果请求的是页面的话，将会走到下面的if 分支，最后一个适用于其余的文件
+    if(strcasecmp(m_url,"/judge.html") == 0){
+        strcpy(m_resources_dir,rootDir);
+        strcat(m_resources_dir,m_url);
+    }
+    else if(m_url[1] == '0'){
+        strcpy(m_resources_dir,rootDir);
+        strcat(m_resources_dir,"/register.html");
+    }
+    else if(m_url[1] == '1'){
+        strcpy(m_resources_dir,rootDir);
+        strcat(m_resources_dir,"/log.html");
+    }            //登录界面访问的是2
+    else if(cgi&&(m_url[1] == '2' || m_url[1] == '3')){   //2 和 3都需要通过数据库确认才能确认跳转页面 ，3是注册页面的请求，请求成功返回登录界面，否则返回注册失败界面
+        //登录界面访问的是2，如果成功就返回welcom.html,否则logError.html
+
+        //获取用户名和密码
+        // m_string : user=qingfeng&password=123321
+        char* name = strchr(m_string,'=')+1;
+        char* end = strchr(name,'&');
+        *end++ = '\0';
+        char* pass = strchr(end,'=') +1;
+        std::string user = name, passwd = pass;
+
+        //目前先按照成功处理
+        if(m_url[1] == '2'){ //登录  如果没注册 或者密码不对
+            if(http_conn::usr2psswd.count(user)==0 ||usr2psswd[user] != passwd ){
+                strcpy(m_resources_dir,rootDir);
+                strcat(m_resources_dir,"/logError.html");
+            }
+            else{
+                strcpy(m_resources_dir,rootDir);
+                strcat(m_resources_dir,"/welcome.html");
+            }
+        }
+        if(m_url[1] == '3'){  //注册
+           
+            if(http_conn::usr2psswd.count(user) != 0){  //已经被注册过了
+                strcpy(m_resources_dir,rootDir);
+                strcat(m_resources_dir,"/registerError.html");
+            }
+            else{
+                
+                m_sqlLock.lock();  //通过存储好的连接来存入服务器
+                char command[100];
+                bzero(command,100);
+                sprintf(command,"INSERT INTO user (username,passwd) VALUES (\"%s\",\"%s\")",user.c_str(),passwd.c_str());
+
+                if(mysql_query(http_conn::mysqlConn,command)){  //执行成功返回0
+                    std::cout<<"Fail to insert data"<<" "<<mysql_error(http_conn::mysqlConn)<<std::endl;
+                    strcpy(m_resources_dir,rootDir);
+                    strcat(m_resources_dir,"/sqlError.html");
+                }
+                else{ //执行成功了 
+                    http_conn::usr2psswd.insert({user,passwd});
+                    strcpy(m_resources_dir,rootDir);
+                    strcat(m_resources_dir,"/log.html");
+                }
+
+                m_sqlLock.unlock();
+
+            }
+        }
+    }
+    else if(m_url[1] == '5'){
+        strcpy(m_resources_dir,rootDir);
+        strcat(m_resources_dir,"/picture.html");
+    }
+    else if(m_url[1] == '6'){
+        strcpy(m_resources_dir,rootDir);
+        strcat(m_resources_dir,"/video.html");
+    }
+    else if(m_url[1] == '7'){
+        strcpy(m_resources_dir,rootDir);
+        strcat(m_resources_dir,"/fans.html");
+    }
+    else{  //除了页面以外的文件 
+        strcpy(m_resources_dir,rootDir);
+        strcat(m_resources_dir,m_url);
+    }
+    
+
+
+    
     int ret = stat(m_resources_dir, &m_stat);
+
+
     if (ret == -1)
     {
         perror("stat");
@@ -542,43 +671,63 @@ bool http_conn::write()   //epoll 监听到EPOLLOUT 事件以后 就会调用这
         init();
         return true;
     }
-    printf("send response of %s\n",m_resources_dir);
-    if(strcasecmp(m_resources_dir,"./resources/favicon.ico")==0){
-        printf("%s",m_write_buf);
-    }
+    // printf("with fd: %d ,send response of %s\n",m_sockfd,m_resources_dir);
     //循环地发送数据 直至发送完成为止
-    while(1){
-        // if(bytes_have_send<m_iov[0].iov_len){
-        //     temp = send(m_sockfd,m_iov[0].iov_base,m_iov[0].iov_len,0);
-        // }
-        // else{
-        //     temp = send(m_sockfd,m_iov[1].iov_base,m_iov[1].iov_len,0);
-        // }
-        // temp = writev(m_sockfd,m_iov,m_iv_count);
-        temp = writev(m_sockfd, m_iov, m_iv_count);   //这里是不完备的 没办法一次发送大文件
-        if(temp<=-1){
-            //无法发送了
-            if(errno == EAGAIN){
-                //TCP没有缓存空间了，等待下一轮的EPOLLOUT事件
 
-                //继续发送
+    while(1){
+
+        // //
+        // temp = writev(m_sockfd, m_iov, m_iv_count);   //这里是不完备的 没办法一次发送大文件
+        // if(temp<=-1){
+        //     //无法发送了
+        //     if(errno == EAGAIN){
+        //         //TCP没有缓存空间了，等待下一轮的EPOLLOUT事件
+
+        //         //继续发送
                 
-                modfd(m_epollfd,m_sockfd,EPOLLOUT);
-                return true;
+        //         modfd(m_epollfd,m_sockfd,EPOLLOUT);
+        //         return true;  //true 就是不要关闭连接
+        //     }
+        //     //那就是对面关闭了
+        //     unmap();
+        //     return false;
+        // }
+
+        // bytes_to_send -= temp;
+        // bytes_have_send  += temp;
+        //如果bytes_to_send大于0，会重新循环，但是文件还是从头开始发，这是个bug
+
+
+        temp = writev(m_sockfd,m_iov,m_iv_count);
+        if(temp == -1 ){   //缓存满了
+            if(errno == EAGAIN){
+                modfd(m_epollfd,m_sockfd,EPOLLIN);
+                return true;   //继续监听
             }
-            //那就是对面关闭了
             unmap();
             return false;
         }
 
+        bytes_have_send += temp;
         bytes_to_send -= temp;
-        bytes_have_send  += temp;
-        if(bytes_to_send<=0){
+
+        if(bytes_to_send>0){//数据没发完
+            if(bytes_have_send < m_iov[0].iov_len){  //报头数据都没发完
+                m_iov[0].iov_base = (char*)m_iov[0].iov_base + bytes_have_send;
+                m_iov[0].iov_len -= bytes_have_send;
+            }
+            else{  //响应报头已经发完了，数据没发完
+                m_iov[0].iov_len = 0;
+                m_iov[1].iov_base = (char*)m_iov[1].iov_base + (bytes_have_send - m_write_idx);  //m_iov[0].iov_len可能已经被修改过了
+                m_iov[1].iov_len = bytes_to_send;
+            }
+        }
+        else{ //bytes_to_send<=0
             //数据发送完了
             unmap();  //释放共享内存的资源
-            modfd(m_epollfd,m_sockfd,EPOLLIN);  //因为是ONESHOT
+            modfd(m_epollfd,m_sockfd,EPOLLIN);  //默认继续监听这个文件描述符吧
             if(m_linger){
-                init();   //保持连接 返回true
+                init();   //保持连接 返回true   如果不长连接的话，那么说明对面就要关闭这个fd了
                 return true;
             }
             else{

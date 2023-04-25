@@ -16,11 +16,13 @@
 #include<sys/uio.h>
 #include<string.h>
 #include <sys/stat.h>
-
-
+#include "../mysqlpool/sqlconnpool.h"
+#include<iostream>
+#include<map>
+#include<string>
 
 class util_timer;
-class sort_timer_lst;
+class sort_timer_lst;  //非活跃用户需要用到的
 
 class http_conn{ //请求事件对象
 
@@ -90,6 +92,7 @@ http响应格式示例：
     static int m_user_count; //已连接用户的数量
     static const int READ_BUFFER_SIZE = 2048;
     static const int WRITE_BUFFER_SIZE = 2048;
+    static MYSQL* mysqlConn;
 
     http_conn(){}  //构造
 
@@ -100,10 +103,11 @@ http响应格式示例：
     void close_conn();  //关闭连接，但并不是析构掉当前的对象,可以继续被其它socket复用的
     bool read();  //非阻塞地读
     bool write(); //非阻塞地写
+    static void init_mysqlConn();
     util_timer* timer; //记录当前连接对应的
     friend class sort_timer_lst;
-    
-
+    static std::map<std::string,std::string> usr2psswd;
+    static locker m_sqlLock;
 
 
 private:
@@ -113,7 +117,6 @@ private:
     int m_checked_index; //当前正在分析的字符在读缓冲区中的位置+1  由parse_line函数处理
     int m_start_line; //当前正在解析的行的起始位置,即当前行的起始地址
 
-   
     //定义读写缓冲区
     char m_read_buf[READ_BUFFER_SIZE];
     int m_read_idx ;//标识缓冲区已经读入客户端数据的最后一个字节的下一个位置
@@ -126,12 +129,16 @@ private:
     char* m_url;   // 解析出请求的URL 
     char* m_version;  //协议版本
     METHOD m_method;   //解析出请求的方法
+    bool cgi;   //记录用户是否使用过Post功能
     
     //请求头的内容
     char * m_host; //主机名
     bool m_linger;  //http请求是不是要保持连接
     struct stat m_stat;  //待发送文件的文件状态
     unsigned long m_content_length;  //请求报文中数据体的字节数目
+    //请求体的内容
+    char* m_string;
+    //write相关的内容
     char m_resources_dir[100];  //资源路径
     char* m_resource_addr; //内存映射之后的地址
     struct iovec m_iov[2];  //io向量 跟writev搭配使用
@@ -141,7 +148,8 @@ private:
 
     //初始化一些默认信息
     void init();   //初始化连接其余的信息
-
+    
+    
     //读取的状态
     HTTP_CODE process_read(); //解析HTTP的请求 
     

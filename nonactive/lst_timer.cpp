@@ -1,8 +1,8 @@
 #include "../Headers.h"
 
 
-util_timer::util_timer(http_conn* user):prev(NULL),next(NULL),user_data(user){
-        expire = time(NULL);
+util_timer::util_timer(http_conn* user,time_t expire_time):prev(NULL),next(NULL),user_data(user){
+        expire = expire_time;
         user_data->timer = this;
     }
 
@@ -119,7 +119,7 @@ void sort_timer_lst::tick(){
         head = head->next;
         if(head)
             head->prev = nullptr;
-        CurNode->user_data->close_conn();
+        CurNode->user_data->close_conn();   //不需要取消监听吗？
         delete CurNode;
     }
     if(head==nullptr){
